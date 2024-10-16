@@ -10,7 +10,7 @@ template <typename>
 class Delegate;
 
 template <typename TRet, typename... Args>
-class Delegate<TRet(Args...)>
+class Delegate<TRet(Args...)> final
 {
 private:
     struct _ICallable {
@@ -23,18 +23,36 @@ private:
 
     template <typename TCallableObject>
     struct _CallableObjectWrapper : _ICallable {
-        TCallableObject _obj;
+        alignas(TCallableObject) char _buf[sizeof(TCallableObject)];
         _CallableObjectWrapper(const TCallableObject &obj)
-            : _obj(obj)
         {
+            memset(_buf, 0, sizeof(_buf));
+            new (_buf) TCallableObject(obj);
+        }
+        _CallableObjectWrapper(const _CallableObjectWrapper &other)
+        {
+            memset(_buf, 0, sizeof(_buf));
+            new (_buf) TCallableObject(other.GetObject());
+        }
+        virtual ~_CallableObjectWrapper()
+        {
+            GetObject().~TCallableObject();
+        }
+        TCallableObject &GetObject()
+        {
+            return *reinterpret_cast<TCallableObject *>(_buf);
+        }
+        const TCallableObject &GetObject() const
+        {
+            return *reinterpret_cast<const TCallableObject *>(_buf);
         }
         virtual TRet Invoke(Args... args) const override
         {
-            return _obj(std::forward<Args>(args)...);
+            return GetObject()(std::forward<Args>(args)...);
         }
         virtual _ICallable *Clone() const override
         {
-            return new _CallableObjectWrapper(_obj);
+            return new _CallableObjectWrapper(*this);
         }
         virtual const std::type_info *GetTypeInfo() const override
         {
@@ -47,15 +65,15 @@ private:
                 return false;
             }
             if (typeinfo == &typeid(Delegate<TRet(Args...)>)) {
-                return *reinterpret_cast<const Delegate<TRet(Args...)> *>(reinterpret_cast<const void *>(&_obj)) ==
-                       *reinterpret_cast<const Delegate<TRet(Args...)> *>(reinterpret_cast<const void *>(&static_cast<const _CallableObjectWrapper &>(other)._obj));
+                return *reinterpret_cast<const Delegate<TRet(Args...)> *>(_buf) ==
+                       *reinterpret_cast<const Delegate<TRet(Args...)> *>(static_cast<const _CallableObjectWrapper &>(other)._buf);
             } else {
                 // Unknown type, could be a function pointer, lambda, or other type.
                 // Comparing function pointers and lambdas without captured variables is generally safe,
                 // since they can be converted to function pointers and have well-defined layouts.
                 // However, using memcpy to compare lambdas with captured variables or custom types
                 // is undefined behavior, as their memory layouts are not standardized in the C++ specification.
-                return memcmp(&_obj, &static_cast<const _CallableObjectWrapper &>(other)._obj, sizeof(_obj)) == 0;
+                return memcmp(_buf, static_cast<const _CallableObjectWrapper &>(other)._buf, sizeof(_buf)) == 0;
             }
         }
     };
