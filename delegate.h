@@ -1,6 +1,7 @@
 #ifndef _DELEGATE_H_
 #define _DELEGATE_H_
 
+#include <cstdint>
 #include <cstring>
 #include <memory>
 #include <stdexcept>
@@ -42,22 +43,48 @@ private:
     template <typename T>
     class _CallableWrapper : public _ICallable
     {
-        mutable T value;
+        using TVal = typename std::decay<T>::type;
+        alignas(TVal) uint8_t mutable _storage[sizeof(TVal)];
 
     public:
-        _CallableWrapper(const T &value) : value(value)
+        _CallableWrapper(const TVal &value)
         {
+            memset(_storage, 0, sizeof(_storage));
+            new (_storage) TVal(value);
         }
-        _CallableWrapper(T &&value) : value(std::move(value))
+        _CallableWrapper(TVal &&value)
         {
+            memset(_storage, 0, sizeof(_storage));
+            new (_storage) TVal(std::move(value));
+        }
+        virtual ~_CallableWrapper()
+        {
+            Clear();
+        }
+        TVal &GetValue() const
+        {
+            return *reinterpret_cast<TVal *>(_storage);
+        }
+        template <typename U = TVal>
+        typename std::enable_if<!(std::is_fundamental<U>::value || std::is_pointer<U>::value), void>::type
+        Clear()
+        {
+            GetValue().~U();
+            memset(_storage, 0, sizeof(_storage));
+        }
+        template <typename U = TVal>
+        typename std::enable_if<std::is_fundamental<U>::value || std::is_pointer<U>::value, void>::type
+        Clear()
+        {
+            memset(_storage, 0, sizeof(_storage));
         }
         TRet Invoke(Args... args) const override
         {
-            return value(std::forward<Args>(args)...);
+            return GetValue()(std::forward<Args>(args)...);
         }
         _ICallable *Clone() const override
         {
-            return new _CallableWrapper<T>(value);
+            return new _CallableWrapper(GetValue());
         }
         const std::type_info &GetTypeInfo() const override
         {
@@ -67,7 +94,7 @@ private:
         {
             return EqualsImpl(other);
         }
-        template <typename U = T>
+        template <typename U = TVal>
         typename std::enable_if<_IsEqualityComparable<U>::value, bool>::type
         EqualsImpl(const _ICallable &other) const
         {
@@ -77,10 +104,10 @@ private:
             if (GetTypeInfo() != other.GetTypeInfo()) {
                 return false;
             }
-            const auto &otherWrapper = static_cast<const _CallableWrapper<U> &>(other);
-            return value == otherWrapper.value;
+            const auto &otherWrapper = static_cast<const _CallableWrapper &>(other);
+            return GetValue() == otherWrapper.GetValue();
         }
-        template <typename U = T>
+        template <typename U = TVal>
         typename std::enable_if<!_IsEqualityComparable<U>::value, bool>::type
         EqualsImpl(const _ICallable &other) const
         {
@@ -118,7 +145,7 @@ private:
             if (GetTypeInfo() != other.GetTypeInfo()) {
                 return false;
             }
-            const auto &otherWrapper = static_cast<const _MemberFuncWrapper<T> &>(other);
+            const auto &otherWrapper = static_cast<const _MemberFuncWrapper &>(other);
             return obj == otherWrapper.obj && func == otherWrapper.func;
         }
     };
@@ -153,7 +180,7 @@ private:
             if (GetTypeInfo() != other.GetTypeInfo()) {
                 return false;
             }
-            const auto &otherWrapper = static_cast<const _ConstMemberFuncWrapper<T> &>(other);
+            const auto &otherWrapper = static_cast<const _ConstMemberFuncWrapper &>(other);
             return obj == otherWrapper.obj && func == otherWrapper.func;
         }
     };
