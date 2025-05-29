@@ -3,205 +3,203 @@
 
 #include <cstring>
 #include <memory>
+#include <stdexcept>
+#include <typeinfo>
+#include <type_traits>
 #include <vector>
-#include <exception>
+
+template <typename>
+struct ICallable;
 
 template <typename>
 class Delegate;
 
 template <typename TRet, typename... Args>
-class Delegate<TRet(Args...)> final
+struct ICallable<TRet(Args...)> {
+    virtual ~ICallable()                              = default;
+    virtual TRet Invoke(Args... args) const           = 0;
+    virtual ICallable *Clone() const                  = 0;
+    virtual const std::type_info &GetTypeInfo() const = 0;
+    virtual bool Equals(const ICallable &other) const = 0;
+};
+
+template <typename TRet, typename... Args>
+class Delegate<TRet(Args...)> final : public ICallable<TRet(Args...)>
 {
 private:
-    struct _ICallable {
-        virtual ~_ICallable()                              = default;
-        virtual TRet Invoke(Args... args) const            = 0;
-        virtual _ICallable *Clone() const                  = 0;
-        virtual const std::type_info *GetTypeInfo() const  = 0;
-        virtual bool Equals(const _ICallable &other) const = 0;
+    using _ICallable = ICallable<TRet(Args...)>;
+
+    template <typename T, typename = void>
+    struct _IsEqualityComparable : std::false_type {
     };
 
-    template <typename TCallableObject>
-    struct _CallableObjectWrapper : _ICallable {
-        alignas(TCallableObject) char _buf[sizeof(TCallableObject)];
-        _CallableObjectWrapper(const TCallableObject &obj)
-        {
-            memset(_buf, 0, sizeof(_buf));
-            new (_buf) TCallableObject(obj);
-        }
-        _CallableObjectWrapper(const _CallableObjectWrapper &other)
-        {
-            memset(_buf, 0, sizeof(_buf));
-            new (_buf) TCallableObject(other.GetObject());
-        }
-        virtual ~_CallableObjectWrapper()
-        {
-            GetObject().~TCallableObject();
-        }
-        TCallableObject &GetObject()
-        {
-            return *reinterpret_cast<TCallableObject *>(_buf);
-        }
-        const TCallableObject &GetObject() const
-        {
-            return *reinterpret_cast<const TCallableObject *>(_buf);
-        }
-        virtual TRet Invoke(Args... args) const override
-        {
-            return GetObject()(std::forward<Args>(args)...);
-        }
-        virtual _ICallable *Clone() const override
-        {
-            return new _CallableObjectWrapper(*this);
-        }
-        virtual const std::type_info *GetTypeInfo() const override
-        {
-            return &typeid(TCallableObject);
-        }
-        virtual bool Equals(const _ICallable &other) const override
-        {
-            auto typeinfo = GetTypeInfo();
-            if (typeinfo != other.GetTypeInfo()) {
-                return false;
-            }
-            if (typeinfo == &typeid(Delegate<TRet(Args...)>)) {
-                return *reinterpret_cast<const Delegate<TRet(Args...)> *>(_buf) ==
-                       *reinterpret_cast<const Delegate<TRet(Args...)> *>(static_cast<const _CallableObjectWrapper &>(other)._buf);
-            } else {
-                // Unknown type, could be a function pointer, lambda, or other type.
-                // Comparing function pointers and lambdas without captured variables is generally safe,
-                // since they can be converted to function pointers and have well-defined layouts.
-                // However, using memcpy to compare lambdas with captured variables or custom types
-                // is undefined behavior, as their memory layouts are not standardized in the C++ specification.
-                return memcmp(_buf, static_cast<const _CallableObjectWrapper &>(other)._buf, sizeof(_buf)) == 0;
-            }
-        }
+    template <typename T>
+    struct _IsEqualityComparable<
+        T,
+        typename std::enable_if<true, decltype(void(std::declval<T>() == std::declval<T>()))>::type> : std::true_type {
     };
 
-    template <typename TObject>
-    struct _MemberFunctionWrapper : _ICallable {
-        TObject *_pObj;
-        TRet (TObject::*_func)(Args...);
-        _MemberFunctionWrapper(TObject &obj, TRet (TObject::*func)(Args...))
-            : _pObj(&obj), _func(func)
+    template <typename T>
+    class _CallableWrapper : public _ICallable
+    {
+        mutable T value;
+
+    public:
+        _CallableWrapper(const T &value) : value(value)
         {
         }
-        virtual TRet Invoke(Args... args) const override
+        _CallableWrapper(T &&value) : value(std::move(value))
         {
-            return (_pObj->*_func)(std::forward<Args>(args)...);
         }
-        virtual _ICallable *Clone() const override
+        TRet Invoke(Args... args) const override
         {
-            return new _MemberFunctionWrapper(*_pObj, _func);
+            return value(std::forward<Args>(args)...);
         }
-        virtual const std::type_info *GetTypeInfo() const override
+        _ICallable *Clone() const override
         {
-            return &typeid(_func);
+            return new _CallableWrapper<T>(value);
         }
-        virtual bool Equals(const _ICallable &other) const override
+        const std::type_info &GetTypeInfo() const override
         {
+            return typeid(T);
+        }
+        bool Equals(const _ICallable &other) const override
+        {
+            return EqualsImpl(other);
+        }
+        template <typename U = T>
+        typename std::enable_if<_IsEqualityComparable<U>::value, bool>::type
+        EqualsImpl(const _ICallable &other) const
+        {
+            if (this == &other) {
+                return true;
+            }
             if (GetTypeInfo() != other.GetTypeInfo()) {
                 return false;
             }
-            auto &mfw = static_cast<const _MemberFunctionWrapper &>(other);
-            return _pObj == mfw._pObj && _func == mfw._func;
+            const auto &otherWrapper = static_cast<const _CallableWrapper<U> &>(other);
+            return value == otherWrapper.value;
+        }
+        template <typename U = T>
+        typename std::enable_if<!_IsEqualityComparable<U>::value, bool>::type
+        EqualsImpl(const _ICallable &other) const
+        {
+            return this == &other;
         }
     };
 
-    template <typename TObject>
-    struct _ConstMemberFunctionWrapper : _ICallable {
-        const TObject *_pObj;
-        TRet (TObject::*_func)(Args...) const;
-        _ConstMemberFunctionWrapper(const TObject &obj, TRet (TObject::*func)(Args...) const)
-            : _pObj(&obj), _func(func)
+    template <typename T>
+    class _MemberFuncWrapper : public _ICallable
+    {
+        T *obj;
+        TRet (T::*func)(Args...);
+
+    public:
+        _MemberFuncWrapper(T &obj, TRet (T::*func)(Args...)) : obj(&obj), func(func)
         {
         }
-        virtual TRet Invoke(Args... args) const override
+        TRet Invoke(Args... args) const override
         {
-            return (_pObj->*_func)(std::forward<Args>(args)...);
+            return (obj->*func)(std::forward<Args>(args)...);
         }
-        virtual _ICallable *Clone() const override
+        _ICallable *Clone() const override
         {
-            return new _ConstMemberFunctionWrapper(*_pObj, _func);
+            return new _MemberFuncWrapper(*obj, func);
         }
-        virtual const std::type_info *GetTypeInfo() const override
+        const std::type_info &GetTypeInfo() const override
         {
-            return &typeid(_func);
+            return typeid(func);
         }
-        virtual bool Equals(const _ICallable &other) const override
+        bool Equals(const _ICallable &other) const override
         {
+            if (this == &other) {
+                return true;
+            }
             if (GetTypeInfo() != other.GetTypeInfo()) {
                 return false;
             }
-            auto &cmfw = static_cast<const _ConstMemberFunctionWrapper &>(other);
-            return _pObj == cmfw._pObj && _func == cmfw._func;
+            const auto &otherWrapper = static_cast<const _MemberFuncWrapper<T> &>(other);
+            return obj == otherWrapper.obj && func == otherWrapper.func;
+        }
+    };
+
+    template <typename T>
+    class _ConstMemberFuncWrapper : public _ICallable
+    {
+        const T *obj;
+        TRet (T::*func)(Args...) const;
+
+    public:
+        _ConstMemberFuncWrapper(const T &obj, TRet (T::*func)(Args...) const) : obj(&obj), func(func)
+        {
+        }
+        TRet Invoke(Args... args) const override
+        {
+            return (obj->*func)(std::forward<Args>(args)...);
+        }
+        _ICallable *Clone() const override
+        {
+            return new _ConstMemberFuncWrapper(*obj, func);
+        }
+        const std::type_info &GetTypeInfo() const override
+        {
+            return typeid(func);
+        }
+        bool Equals(const _ICallable &other) const override
+        {
+            if (this == &other) {
+                return true;
+            }
+            if (GetTypeInfo() != other.GetTypeInfo()) {
+                return false;
+            }
+            const auto &otherWrapper = static_cast<const _ConstMemberFuncWrapper<T> &>(other);
+            return obj == otherWrapper.obj && func == otherWrapper.func;
         }
     };
 
 private:
-    std::vector<std::unique_ptr<_ICallable>> _funcs;
+    std::vector<std::unique_ptr<_ICallable>> _data;
 
 public:
-    Delegate(std::nullptr_t = nullptr)
-    {
-    }
+    Delegate() = default;
 
-    Delegate(const Delegate &other)
-    {
-        _funcs.reserve(other._funcs.size());
-        for (auto &item : other._funcs) {
-            _funcs.emplace_back(item->Clone());
-        }
-    }
-
-    Delegate(Delegate &&other)
-    {
-        _funcs = std::move(other._funcs);
-    }
-
-    template <typename TCallableObject>
-    Delegate(const TCallableObject &callable)
+    Delegate(const ICallable<TRet(Args...)> &callable)
     {
         Add(callable);
     }
 
-    template <typename TObject>
-    Delegate(TObject &obj, TRet (TObject::*func)(Args...))
+    Delegate(TRet (*func)(Args...))
     {
-        Add(obj, func);
+        Add(func);
     }
 
-    template <typename TObject>
-    Delegate(const TObject &obj, TRet (TObject::*func)(Args...) const)
+    template <typename T>
+    Delegate(const T &callable)
     {
-        Add(obj, func);
+        Add(callable);
     }
 
-    TRet operator()(Args... args) const
+    Delegate(const Delegate &other)
     {
-        if (_funcs.empty()) {
-            throw std::runtime_error("empty delegate");
+        _data.reserve(other._data.size());
+        for (const auto &item : other._data) {
+            _data.emplace_back(item->Clone());
         }
-        for (size_t i = 0; i < _funcs.size() - 1; ++i) {
-            _funcs[i]->Invoke(std::forward<Args>(args)...);
-        }
-        return _funcs.back()->Invoke(std::forward<Args>(args)...);
     }
 
-    TRet Invoke(Args... args) const
+    Delegate(Delegate &&other) : _data(std::move(other._data))
     {
-        return (*this)(std::forward<Args>(args)...);
     }
 
     Delegate &operator=(const Delegate &other)
     {
-        if (this == &other) {
-            return *this;
-        }
-        _funcs.clear();
-        _funcs.reserve(other._funcs.size());
-        for (auto &item : other._funcs) {
-            _funcs.emplace_back(item->Clone());
+        if (this != &other) {
+            _data.clear();
+            _data.reserve(other._data.size());
+            for (const auto &item : other._data) {
+                _data.emplace_back(item->Clone());
+            }
         }
         return *this;
     }
@@ -209,173 +207,211 @@ public:
     Delegate &operator=(Delegate &&other)
     {
         if (this != &other) {
-            _funcs = std::move(other._funcs);
+            _data = std::move(other._data);
         }
         return *this;
+    }
+
+    void Add(const ICallable<TRet(Args...)> &callable)
+    {
+        _data.emplace_back(callable.Clone());
+    }
+
+    void Add(TRet (*func)(Args...))
+    {
+        if (func != nullptr) {
+            _data.emplace_back(std::make_unique<_CallableWrapper<decltype(func)>>(func));
+        }
+    }
+
+    template <typename T>
+    void Add(const T &callable)
+    {
+        _data.emplace_back(std::make_unique<_CallableWrapper<T>>(callable));
+    }
+
+    template <typename T>
+    void Add(T &obj, TRet (T::*func)(Args...))
+    {
+        _data.emplace_back(std::make_unique<_MemberFuncWrapper<T>>(obj, func));
+    }
+
+    template <typename T>
+    void Add(const T &obj, TRet (T::*func)(Args...) const)
+    {
+        _data.emplace_back(std::make_unique<_ConstMemberFuncWrapper<T>>(obj, func));
     }
 
     void Clear()
     {
-        _funcs.clear();
+        _data.clear();
     }
 
-    Delegate &operator=(std::nullptr_t)
+    bool Remove(const ICallable<TRet(Args...)> &callable)
     {
-        _funcs.clear();
-        return *this;
+        return _Remove(callable);
     }
 
-    bool IsNull() const
+    bool Remove(TRet (*func)(Args...))
     {
-        return _funcs.empty();
+        if (func == nullptr) {
+            return false;
+        }
+        return _Remove(_CallableWrapper<decltype(func)>(func));
+    }
+
+    template <typename T>
+    bool Remove(const T &callable)
+    {
+        return _Remove(_CallableWrapper<T>(callable));
+    }
+
+    template <typename T>
+    bool Remove(T &obj, TRet (T::*func)(Args...))
+    {
+        return _Remove(_MemberFuncWrapper<T>(obj, func));
+    }
+
+    template <typename T>
+    bool Remove(const T &obj, TRet (T::*func)(Args...) const)
+    {
+        return _Remove(_ConstMemberFuncWrapper<T>(obj, func));
+    }
+
+    TRet operator()(Args... args) const
+    {
+        return Invoke(std::forward<Args>(args)...);
+    }
+
+    bool operator==(const Delegate &other) const
+    {
+        return Equals(other);
+    }
+
+    bool operator!=(const Delegate &other) const
+    {
+        return !Equals(other);
     }
 
     bool operator==(std::nullptr_t) const
     {
-        return _funcs.empty();
+        return _data.empty();
     }
 
     bool operator!=(std::nullptr_t) const
     {
-        return !_funcs.empty();
+        return !_data.empty();
     }
 
-    template <typename TCallableObject>
-    void Add(const TCallableObject &callable)
+    operator bool() const
     {
-        _funcs.emplace_back(new _CallableObjectWrapper<TCallableObject>(callable));
+        return !_data.empty();
     }
 
-    void Add(TRet (*ptr)(Args...))
-    {
-        if (ptr) {
-            _funcs.emplace_back(new _CallableObjectWrapper<decltype(ptr)>(ptr));
-        }
-    }
-
-    void Add(std::nullptr_t)
-    {
-    }
-
-    template <typename TObject>
-    void Add(TObject &obj, TRet (TObject::*func)(Args...))
-    {
-        if (func) {
-            _funcs.emplace_back(new _MemberFunctionWrapper<TObject>(obj, func));
-        }
-    }
-
-    template <typename TObject>
-    void Add(const TObject &obj, TRet (TObject::*func)(Args...) const)
-    {
-        if (func) {
-            _funcs.emplace_back(new _ConstMemberFunctionWrapper<TObject>(obj, func));
-        }
-    }
-
-    template <typename TCallableObject>
-    Delegate &operator+=(const TCallableObject &callable)
+    Delegate &operator+=(const ICallable<TRet(Args...)> &callable)
     {
         Add(callable);
         return *this;
     }
 
-    Delegate &operator+=(TRet (*ptr)(Args...))
+    Delegate &operator+=(TRet (*func)(Args...))
     {
-        Add(ptr);
+        Add(func);
         return *this;
     }
 
-    Delegate &operator+=(std::nullptr_t)
+    template <typename T>
+    Delegate &operator+=(const T &callable)
     {
+        Add(callable);
         return *this;
     }
 
-    template <typename TCallableObject>
-    void Remove(const TCallableObject &callable)
-    {
-        _CallableObjectWrapper<TCallableObject> wrapper(callable);
-        _Remove(wrapper);
-    }
-
-    void Remove(TRet (*ptr)(Args...))
-    {
-        if (ptr) {
-            _CallableObjectWrapper<decltype(ptr)> wrapper(ptr);
-            _Remove(wrapper);
-        }
-    }
-
-    void Remove(std::nullptr_t)
-    {
-    }
-
-    template <typename TObject>
-    void Remove(TObject &obj, TRet (TObject::*func)(Args...))
-    {
-        if (func) {
-            _MemberFunctionWrapper<TObject> wrapper(obj, func);
-            _Remove(wrapper);
-        }
-    }
-
-    template <typename TObject>
-    void Remove(const TObject &obj, TRet (TObject::*func)(Args...) const)
-    {
-        if (func) {
-            _ConstMemberFunctionWrapper<TObject> wrapper(obj, func);
-            _Remove(wrapper);
-        }
-    }
-
-    template <typename TCallableObject>
-    Delegate &operator-=(const TCallableObject &callable)
+    Delegate &operator-=(const ICallable<TRet(Args...)> &callable)
     {
         Remove(callable);
         return *this;
     }
 
-    Delegate &operator-=(TRet (*ptr)(Args...))
+    Delegate &operator-=(TRet (*func)(Args...))
     {
-        Remove(ptr);
+        Remove(func);
         return *this;
     }
 
-    Delegate &operator-=(std::nullptr_t)
+    template <typename T>
+    Delegate &operator-=(const T &callable)
     {
+        Remove(callable);
         return *this;
     }
 
-    bool operator==(const Delegate &other) const
+    virtual TRet Invoke(Args... args) const override
+    {
+        if (_data.empty()) {
+            throw std::runtime_error("Delegate is empty");
+        }
+        for (size_t i = 0; i < _data.size() - 1; ++i) {
+            _data[i]->Invoke(std::forward<Args>(args)...);
+        }
+        return _data.back()->Invoke(std::forward<Args>(args)...);
+    }
+
+    virtual ICallable<TRet(Args...)> *Clone() const override
+    {
+        return new Delegate(*this);
+    }
+
+    virtual const std::type_info &GetTypeInfo() const override
+    {
+        return typeid(Delegate<TRet(Args...)>);
+    }
+
+    virtual bool Equals(const ICallable<TRet(Args...)> &other) const override
     {
         if (this == &other) {
             return true;
         }
-        if (_funcs.size() != other._funcs.size()) {
+        if (GetTypeInfo() != other.GetTypeInfo()) {
             return false;
         }
-        for (size_t i = 0; i < _funcs.size(); ++i) {
-            if (!_funcs[i]->Equals(*other._funcs[i])) {
+        const auto &otherDelegate = static_cast<const Delegate<TRet(Args...)> &>(other);
+        if (_data.size() != otherDelegate._data.size()) {
+            return false;
+        }
+        for (size_t i = 0; i < _data.size(); ++i) {
+            if (!_data[i]->Equals(*otherDelegate._data[i])) {
                 return false;
             }
         }
         return true;
     }
 
-    bool operator!=(const Delegate &other) const
+    template <typename U = TRet>
+    typename std::enable_if<!std::is_void<U>::value, std::vector<U>>::type
+    InvokeAll(Args... args) const
     {
-        return !(*this == other);
+        std::vector<U> results;
+        results.reserve(_data.size());
+        for (const auto &callable : _data) {
+            results.emplace_back(callable->Invoke(std::forward<Args>(args)...));
+        }
+        return results;
     }
 
 private:
-    void _Remove(_ICallable &callable)
+    bool _Remove(const _ICallable &callable)
     {
-        for (size_t i = _funcs.size(); i > 0; --i) {
-            if (_funcs[i - 1]->Equals(callable)) {
-                _funcs.erase(_funcs.begin() + (i - 1));
-                return;
+        auto it  = _data.rbegin();
+        auto end = _data.rend();
+        while (it != end) {
+            if ((*it)->Equals(callable)) {
+                _data.erase(std::next(it).base());
+                return true;
             }
+            ++it;
         }
+        return false;
     }
 };
 
