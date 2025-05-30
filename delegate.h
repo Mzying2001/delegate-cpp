@@ -2,6 +2,7 @@
 #define _DELEGATE_H_
 
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <memory>
 #include <stdexcept>
@@ -40,43 +41,40 @@ private:
         typename std::enable_if<true, decltype(void(std::declval<T>() == std::declval<T>()))>::type> : std::true_type {
     };
 
+    template <typename T, typename = void>
+    struct _IsMemcmpSafe : std::false_type {
+    };
+
     template <typename T>
-    class _CallableWrapper : public _ICallable
+    struct _IsMemcmpSafe<
+        T,
+        typename std::enable_if<std::is_trivial<T>::value && std::is_standard_layout<T>::value, void>::type> : std::true_type {
+    };
+
+    template <typename T>
+    class _CallableWrapperImpl : public _ICallable
     {
-        using TVal = typename std::decay<T>::type;
-        alignas(TVal) uint8_t mutable _storage[sizeof(TVal)];
+        alignas(T) mutable uint8_t _storage[sizeof(T)];
 
     public:
-        _CallableWrapper(const TVal &value)
+        _CallableWrapperImpl(const T &value)
         {
             memset(_storage, 0, sizeof(_storage));
-            new (_storage) TVal(value);
+            new (_storage) T(value);
         }
-        _CallableWrapper(TVal &&value)
+        _CallableWrapperImpl(T &&value)
         {
             memset(_storage, 0, sizeof(_storage));
-            new (_storage) TVal(std::move(value));
+            new (_storage) T(std::move(value));
         }
-        virtual ~_CallableWrapper()
+        virtual ~_CallableWrapperImpl()
         {
-            Clear();
+            GetValue().~T();
+            // memset(_storage, 0, sizeof(_storage));
         }
-        TVal &GetValue() const
+        T &GetValue() const noexcept
         {
-            return *reinterpret_cast<TVal *>(_storage);
-        }
-        template <typename U = TVal>
-        typename std::enable_if<!(std::is_fundamental<U>::value || std::is_pointer<U>::value), void>::type
-        Clear()
-        {
-            GetValue().~U();
-            memset(_storage, 0, sizeof(_storage));
-        }
-        template <typename U = TVal>
-        typename std::enable_if<std::is_fundamental<U>::value || std::is_pointer<U>::value, void>::type
-        Clear()
-        {
-            memset(_storage, 0, sizeof(_storage));
+            return *reinterpret_cast<T *>(_storage);
         }
         TRet Invoke(Args... args) const override
         {
@@ -84,7 +82,7 @@ private:
         }
         _ICallable *Clone() const override
         {
-            return new _CallableWrapper(GetValue());
+            return new _CallableWrapperImpl(GetValue());
         }
         const std::type_info &GetTypeInfo() const override
         {
@@ -94,7 +92,7 @@ private:
         {
             return EqualsImpl(other);
         }
-        template <typename U = TVal>
+        template <typename U = T>
         typename std::enable_if<_IsEqualityComparable<U>::value, bool>::type
         EqualsImpl(const _ICallable &other) const
         {
@@ -104,16 +102,32 @@ private:
             if (GetTypeInfo() != other.GetTypeInfo()) {
                 return false;
             }
-            const auto &otherWrapper = static_cast<const _CallableWrapper &>(other);
+            const auto &otherWrapper = static_cast<const _CallableWrapperImpl &>(other);
             return GetValue() == otherWrapper.GetValue();
         }
-        template <typename U = TVal>
-        typename std::enable_if<!_IsEqualityComparable<U>::value, bool>::type
+        template <typename U = T>
+        typename std::enable_if<!_IsEqualityComparable<U>::value && _IsMemcmpSafe<U>::value, bool>::type
+        EqualsImpl(const _ICallable &other) const
+        {
+            if (this == &other) {
+                return true;
+            }
+            if (GetTypeInfo() != other.GetTypeInfo()) {
+                return false;
+            }
+            const auto &otherWrapper = static_cast<const _CallableWrapperImpl &>(other);
+            return memcmp(_storage, otherWrapper._storage, sizeof(_storage)) == 0;
+        }
+        template <typename U = T>
+        typename std::enable_if<!_IsEqualityComparable<U>::value && !_IsMemcmpSafe<U>::value, bool>::type
         EqualsImpl(const _ICallable &other) const
         {
             return this == &other;
         }
     };
+
+    template <typename T>
+    using _CallableWrapper = _CallableWrapperImpl<typename std::decay<T>::type>;
 
     template <typename T>
     class _MemberFuncWrapper : public _ICallable
