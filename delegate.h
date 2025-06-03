@@ -203,7 +203,9 @@ private:
     std::vector<std::unique_ptr<_ICallable>> _data;
 
 public:
-    Delegate() = default;
+    Delegate(std::nullptr_t = nullptr)
+    {
+    }
 
     Delegate(const ICallable<TRet(Args...)> &callable)
     {
@@ -455,6 +457,18 @@ private:
         return false;
     }
 };
+
+template <typename TRet, typename... Args>
+inline bool operator==(std::nullptr_t, const Delegate<TRet(Args...)> &d)
+{
+    return d == nullptr;
+}
+
+template <typename TRet, typename... Args>
+inline bool operator!=(std::nullptr_t, const Delegate<TRet(Args...)> &d)
+{
+    return d != nullptr;
+}
 
 template <typename T>
 using Func = Delegate<T>;
