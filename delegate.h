@@ -48,7 +48,7 @@ private:
     template <typename T>
     struct _IsMemcmpSafe<
         T,
-        typename std::enable_if<std::is_trivial<T>::value && std::is_standard_layout<T>::value, void>::type> : std::true_type {
+        typename std::enable_if</*std::is_trivial<T>::value &&*/ std::is_standard_layout<T>::value, void>::type> : std::true_type {
     };
 
     template <typename T>
