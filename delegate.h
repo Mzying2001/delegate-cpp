@@ -6,8 +6,8 @@
 #include <cstring>
 #include <memory>
 #include <stdexcept>
-#include <typeinfo>
 #include <type_traits>
+#include <typeinfo>
 #include <vector>
 
 template <typename>
@@ -217,10 +217,22 @@ public:
         Add(func);
     }
 
-    template <typename T>
+    template <typename T, typename std::enable_if<!std::is_base_of<_ICallable, T>::value, int>::type = 0>
     Delegate(const T &callable)
     {
         Add(callable);
+    }
+
+    template <typename T>
+    Delegate(T &obj, TRet (T::*func)(Args...))
+    {
+        Add(obj, func);
+    }
+
+    template <typename T>
+    Delegate(const T &obj, TRet (T::*func)(Args...) const)
+    {
+        Add(obj, func);
     }
 
     Delegate(const Delegate &other)
@@ -257,6 +269,15 @@ public:
 
     void Add(const ICallable<TRet(Args...)> &callable)
     {
+        if (callable.GetTypeInfo() == GetTypeInfo()) {
+            auto &delegate = static_cast<const Delegate &>(callable);
+            if (delegate._data.empty()) {
+                return;
+            } else if (delegate._data.size() == 1) {
+                _data.emplace_back(delegate._data.front()->Clone());
+                return;
+            }
+        }
         _data.emplace_back(callable.Clone());
     }
 
@@ -268,7 +289,8 @@ public:
     }
 
     template <typename T>
-    void Add(const T &callable)
+    typename std::enable_if<!std::is_base_of<_ICallable, T>::value, void>::type
+    Add(const T &callable)
     {
         _data.emplace_back(std::make_unique<_CallableWrapper<T>>(callable));
     }
@@ -292,6 +314,14 @@ public:
 
     bool Remove(const ICallable<TRet(Args...)> &callable)
     {
+        if (callable.GetTypeInfo() == GetTypeInfo()) {
+            auto &delegate = static_cast<const Delegate &>(callable);
+            if (delegate._data.empty()) {
+                return false;
+            } else if (delegate._data.size() == 1) {
+                return _Remove(*delegate._data.front());
+            }
+        }
         return _Remove(callable);
     }
 
@@ -304,7 +334,8 @@ public:
     }
 
     template <typename T>
-    bool Remove(const T &callable)
+    typename std::enable_if<!std::is_base_of<_ICallable, T>::value, bool>::type
+    Remove(const T &callable)
     {
         return _Remove(_CallableWrapper<T>(callable));
     }
@@ -364,7 +395,8 @@ public:
     }
 
     template <typename T>
-    Delegate &operator+=(const T &callable)
+    typename std::enable_if<!std::is_base_of<_ICallable, T>::value, Delegate &>::type
+    operator+=(const T &callable)
     {
         Add(callable);
         return *this;
@@ -383,7 +415,8 @@ public:
     }
 
     template <typename T>
-    Delegate &operator-=(const T &callable)
+    typename std::enable_if<!std::is_base_of<_ICallable, T>::value, Delegate &>::type
+    operator-=(const T &callable)
     {
         Remove(callable);
         return *this;
